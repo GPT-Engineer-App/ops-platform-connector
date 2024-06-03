@@ -1,0 +1,7 @@
+import hashlib
+
+SECRET_KEY = "xxxxxx"
+DATABASE_URL = "sqlite:///./test.db"
+
+def hash_password(password: str) -> str:
+    return hashlib.md5((SECRET_KEY + password).encode('utf-8')).hexdigest()

@@ -1,0 +1,102 @@
+from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm import Session
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from models import Base, User, AccessLog
+from config import DATABASE_URL, hash_password
+import time
+import jwt
+
+# Database setup
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base.metadata.create_all(bind=engine)
+
+# FastAPI setup
+app = FastAPI()
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+# Dependency to get DB session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# Middleware for logging and exception handling
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.time()
+    try:
+        response = await call_next(request)
+        process_time = time.time() - start_time
+        status_code = response.status_code
+    except Exception as e:
+        process_time = time.time() - start_time
+        status_code = 500
+        response = {"code": 500, "data": {}, "msg": "Internal Server Error"}
+        raise e
+    finally:
+        db = SessionLocal()
+        log = AccessLog(
+            user_id=request.state.user_id if hasattr(request.state, 'user_id') else None,
+            url=str(request.url),
+            params=str(request.query_params),
+            response_time=int(process_time * 1000),
+            result="1" if status_code == 200 else "0"
+        )
+        db.add(log)
+        db.commit()
+        db.close()
+    return response
+
+# Authentication and authorization
+def authenticate_user(db: Session, username: str, password: str):
+    user = db.query(User).filter(User.username == username).first()
+    if user and user.password == hash_password(password):
+        return user
+    return None
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        username: str = payload.get("sub")
+        if username is None:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        user = db.query(User).filter(User.username == username).first()
+        if user is None:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        return user
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+def get_admin_user(current_user: User = Depends(get_current_user)):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+    return current_user
+
+# Routes
+@app.post("/login")
+def login(username: str, password: str, db: Session = Depends(get_db)):
+    user = authenticate_user(db, username, password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    token = jwt.encode({"sub": user.username}, SECRET_KEY, algorithm="HS256")
+    return {"code": 200, "data": {"token": token}, "msg": "success"}
+
+@app.post("/logout")
+def logout():
+    return {"code": 200, "data": {}, "msg": "success"}
+
+@app.get("/getTicket")
+def get_ticket(current_user: User = Depends(get_admin_user)):
+    # Logic to call platform B's /getTicket API
+    return {"code": 200, "data": {"ticket": "example_ticket"}, "msg": "success"}
+
+@app.post("/getStatus")
+def get_status(ticket: str, current_user: User = Depends(get_admin_user)):
+    # Logic to handle platform B's /getStatus API call
+    return {"code": 200, "data": {"status": "example_status", "personnel": "example_personnel"}, "msg": "success"}
